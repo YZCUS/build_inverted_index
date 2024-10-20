@@ -12,6 +12,7 @@
 #include <queue>
 #include "archive.h"
 #include "archive_entry.h"
+#include <regex>
 
 const int CHUNK_SIZE = 1024 * 64;              // 64KB
 const int LINES_PER_BATCH = 100000;            // process lines per batch
@@ -38,14 +39,14 @@ void writeMergedPostings(std::ofstream &outfile, const std::string &word,
                          const std::vector<std::pair<int, int>> &postings,
                          const std::unordered_map<std::string, LexiconInfo> &lexicon);
 
-// posting struct
+// Posting struct
 struct Posting
 {
     int doc_id;
     int total_term;
 };
 
-// lexicon struct
+// LexiconInfo struct
 struct LexiconInfo
 {
     int start_doc_id;
@@ -71,25 +72,37 @@ struct CompareIndexEntry
     }
 };
 
-// check if a character is punctuation
-bool is_punctuation(char c)
+// process sentence part
+std::vector<std::string> processSentencePart(const std::string &sentence_part)
 {
-    static const std::string punctuations = ",.;:\"'?!()[]{}";
-    return punctuations.find(c) != std::string::npos;
-}
+    std::vector<std::string> words;
+    std::string current_word;
+    current_word.reserve(50); // preallocate memory for current word, let's say 50 characters
 
-// process word
-std::string processWord(const std::string &word)
-{
-    std::string processed;
-    for (char c : word)
+    for (char c : sentence_part)
     {
-        if (!is_punctuation(c) && !std::isdigit(c))
+        if (std::isalpha(c))
         {
-            processed += std::tolower(c);
+            current_word += std::tolower(c);
+        }
+        else if (std::isdigit(c))
+        {
+            current_word += c;
+        }
+        else if (!current_word.empty())
+        {
+            words.push_back(current_word);
+            current_word.clear();
         }
     }
-    return processed;
+
+    if (!current_word.empty())
+    {
+        words.push_back(current_word);
+        current_word.clear();
+    }
+
+    return words;
 }
 
 // process line
@@ -102,15 +115,18 @@ size_t processLine(const std::string &line,
     if (!(iss >> doc_id))
         return 0;
 
-    std::string word;
+    std::string sentence_part;
     std::unordered_map<std::string, int> word_counts;
     size_t memory_increment = 0;
 
-    while (iss >> word)
+    while (iss >> sentence_part)
     {
-        std::string processed_word = processWord(word);
-        if (!processed_word.empty())
-            word_counts[processed_word]++;
+        std::vector<std::string> words = processSentencePart(sentence_part);
+        for (const std::string &word : words)
+        {
+            if (!word.empty())
+                word_counts[word]++;
+        }
     }
 
     for (const auto &[word, count] : word_counts)
