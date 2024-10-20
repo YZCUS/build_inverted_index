@@ -1,0 +1,3 @@
+/Users/zhengchy/Documents/projects/inverted_index/build/CMakeFiles/build_index.dir
+/Users/zhengchy/Documents/projects/inverted_index/build/CMakeFiles/edit_cache.dir
+/Users/zhengchy/Documents/projects/inverted_index/build/CMakeFiles/rebuild_cache.dir
