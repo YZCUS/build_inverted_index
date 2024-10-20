@@ -1,3 +1,52 @@
-/data/*
-./src/collections.tar.gz
-./build
+# 忽略大數據文件
+src/collection.tar.gz
+
+# 忽略構建文件夾
+/build/
+
+# 忽略編譯產生的文件
+*.o
+*.out
+*.exe
+
+# 忽略 IDE 和編輯器生成的文件
+.vscode/
+.idea/
+*.swp
+*~
+
+# 忽略操作系統生成的文件
+.DS_Store
+Thumbs.db
+
+# 忽略 CMake 生成的文件
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# 忽略日誌文件
+*.log
+
+# 忽略臨時文件
+*.tmp
+*.temp
+
+# 忽略可能包含敏感信息的配置文件
+config.ini
+secrets.json
+
+# 忽略壓縮文件（如果有其他壓縮文件不想上傳）
+*.zip
+*.rar
+*.7z
+
+# 忽略所有 .tar.gz 文件（如果您不想上傳任何 .tar.gz 文件）
+# *.tar.gz
+
+# 忽略生成的文檔
+/doc/
+
+# 忽略依賴管理器的文件夾（如果使用）
+/node_modules/
+/vendor/
