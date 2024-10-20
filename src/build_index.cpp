@@ -134,7 +134,7 @@ size_t processLine(const std::string &line,
         if (lexicon.find(word) == lexicon.end())
         {
             lexicon[word] = LexiconInfo{doc_id, doc_id, 1};
-            memory_increment += word.capacity() + sizeof(LexiconInfo);
+            memory_increment += word.size() + sizeof(LexiconInfo);
         }
 
         auto &info = lexicon[word];
@@ -146,7 +146,7 @@ size_t processLine(const std::string &line,
         memory_increment += sizeof(std::pair<int, int>);
         if (index[word].size() == 1)
         {
-            memory_increment += word.capacity() + sizeof(std::vector<std::pair<int, int>>);
+            memory_increment += word.size() + sizeof(std::vector<std::pair<int, int>>);
         }
     }
     std::cout << "processed line: " << doc_id << ", memory increment: " << memory_increment << std::endl;
@@ -202,9 +202,20 @@ void processTarGz(const std::string &filename, int chunk_size)
 
                 std::istringstream content(std::string(buffer, bytesRead));
                 std::string line;
+                std::string leftover;
 
                 while (std::getline(content, line))
                 {
+                    if (!leftover.empty())
+                    {
+                        line = leftover + line;
+                        leftover.clear();
+                    }
+                    if (content.peek() == EOF && line.back() != '\n')
+                    {
+                        leftover = line;
+                        continue;
+                    }
                     size_t memory_increment = processLine(line, index, lexicon);
                     current_memory_usage += memory_increment;
 
@@ -234,17 +245,18 @@ void processTarGz(const std::string &filename, int chunk_size)
     externalSort(file_counter, lexicon);
 }
 
+// estimate memory usage
 size_t estimateMemoryUsage(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
                            const std::unordered_map<std::string, LexiconInfo> &lexicon)
 {
     size_t usage = 0;
     for (const auto &[word, postings] : index)
     {
-        usage += word.capacity() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
+        usage += word.size() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
     }
     for (const auto &[word, info] : lexicon)
     {
-        usage += word.capacity() + sizeof(LexiconInfo);
+        usage += word.size() + sizeof(LexiconInfo);
     }
     return usage;
 }
@@ -255,7 +267,7 @@ size_t estimateIndexMemoryUsage(const std::unordered_map<std::string, std::vecto
     size_t usage = 0;
     for (const auto &[word, postings] : index)
     {
-        usage += word.capacity() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
+        usage += word.size() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
     }
     return usage;
 }
