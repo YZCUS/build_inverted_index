@@ -282,6 +282,8 @@ size_t estimateIndexMemoryUsage(const std::unordered_map<std::string, std::vecto
     return usage;
 }
 
+
+
 // write to file
 void writeToFile(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
                  int file_number)
