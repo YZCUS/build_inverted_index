@@ -17,7 +17,7 @@
 const int CHUNK_SIZE = 1024 * 64;              // 64KB
 const int LINES_PER_BATCH = 100000;            // process lines per batch
 const std::string TEMP_DIR = "temp_index";     // temp directory
-const size_t MEMORY_LIMIT = 900 * 1024 * 1024; // 900MB, leave space for lexicon and other operations
+const size_t MEMORY_LIMIT = 800 * 1024 * 1024; // 800MB, leave space for lexicon and other operations
 
 // forward declarations
 struct IndexEntry;
@@ -108,13 +108,14 @@ std::vector<std::string> processSentencePart(const std::string &sentence_part)
 // process line
 size_t processLine(const std::string &line,
                    std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
-                   std::unordered_map<std::string, LexiconInfo> &lexicon)
+                   std::unordered_map<std::string, LexiconInfo> &lexicon, int &last_doc_id)
 {
     std::istringstream iss(line);
     int doc_id;
-    if (!(iss >> doc_id))
+    if (!(iss >> doc_id) || doc_id < last_doc_id)
+    {
         return 0;
-
+    }
     std::string sentence_part;
     std::unordered_map<std::string, int> word_counts;
     size_t memory_increment = 0;
@@ -134,11 +135,18 @@ size_t processLine(const std::string &line,
         if (lexicon.find(word) == lexicon.end())
         {
             lexicon[word] = LexiconInfo{doc_id, doc_id, 1};
-            memory_increment += word.size() + sizeof(LexiconInfo);
+            memory_increment += word.capacity() + sizeof(LexiconInfo);
         }
 
         auto &info = lexicon[word];
         int diff = doc_id - info.end_doc_id;
+        if (diff < 0)
+        {
+            std::cout << "doc_id: " << doc_id << ", end_doc_id: " << info.end_doc_id << ", diff: " << diff << std::endl;
+            std::cout << "line: " << line << std::endl;
+
+            exit(EXIT_FAILURE); // terminate the program
+        }
         info.end_doc_id = doc_id;
         info.length++;
         index[word].push_back({diff, count});
@@ -146,10 +154,11 @@ size_t processLine(const std::string &line,
         memory_increment += sizeof(std::pair<int, int>);
         if (index[word].size() == 1)
         {
-            memory_increment += word.size() + sizeof(std::vector<std::pair<int, int>>);
+            memory_increment += word.capacity() + sizeof(std::vector<std::pair<int, int>>);
         }
     }
     std::cout << "processed line: " << doc_id << ", memory increment: " << memory_increment << std::endl;
+    last_doc_id = doc_id;
 
     return memory_increment;
 }
@@ -189,6 +198,7 @@ void processTarGz(const std::string &filename, int chunk_size)
 
             char *buffer = new char[chunk_size];
             size_t total_bytes_read = 0;
+            int last_doc_id = -1;
 
             while (total_bytes_read < size)
             {
@@ -216,7 +226,7 @@ void processTarGz(const std::string &filename, int chunk_size)
                         leftover = line;
                         continue;
                     }
-                    size_t memory_increment = processLine(line, index, lexicon);
+                    size_t memory_increment = processLine(line, index, lexicon, last_doc_id);
                     current_memory_usage += memory_increment;
 
                     if (current_memory_usage > MEMORY_LIMIT)
@@ -252,11 +262,11 @@ size_t estimateMemoryUsage(const std::unordered_map<std::string, std::vector<std
     size_t usage = 0;
     for (const auto &[word, postings] : index)
     {
-        usage += word.size() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
+        usage += word.capacity() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
     }
     for (const auto &[word, info] : lexicon)
     {
-        usage += word.size() + sizeof(LexiconInfo);
+        usage += word.capacity() + sizeof(LexiconInfo);
     }
     return usage;
 }
@@ -267,7 +277,7 @@ size_t estimateIndexMemoryUsage(const std::unordered_map<std::string, std::vecto
     size_t usage = 0;
     for (const auto &[word, postings] : index)
     {
-        usage += word.size() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
+        usage += word.capacity() + sizeof(std::vector<std::pair<int, int>>) + postings.capacity() * sizeof(std::pair<int, int>);
     }
     return usage;
 }
