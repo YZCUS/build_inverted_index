@@ -20,18 +20,29 @@ const std::string TEMP_DIR = "temp_index";     // temp directory
 const size_t MEMORY_LIMIT = 800 * 1024 * 1024; // 800MB, leave space for lexicon and other operations
 
 // forward declarations
-struct IndexEntry;
-struct CompareIndexEntry;
 struct Posting;
 struct LexiconInfo;
+struct IndexEntry;
+struct CompareIndexEntry;
+struct DocumentInfo;
 
 // estimate memory usage
 size_t estimateIndexMemoryUsage(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index);
 size_t estimateMemoryUsage(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
-                           const std::unordered_map<std::string, LexiconInfo> &lexicon);
+                           const std::unordered_map<std::string, LexiconInfo> &lexicon,
+                           const std::unordered_map<int, DocumentInfo> &document_info);
+
+// Varbyte encode function
+std::vector<uint8_t> varbyteEncode(int number, int &size);
+// Varbyte decode function
+int varbyteDecode(const std::vector<uint8_t> &encoded);
+
 // write to file
-void writeToFile(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
-                 int file_number);
+void writeIndexToFile(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
+                      int file_number);
+// write document info to file
+void writeDocumentInfoToFile(const std::unordered_map<int, DocumentInfo> &document_info);
+
 // external sort
 void externalSort(int num_files, const std::unordered_map<std::string, LexiconInfo> &lexicon);
 // write merged postings
@@ -49,9 +60,17 @@ struct Posting
 // LexiconInfo struct
 struct LexiconInfo
 {
+    int term_id;
     int start_doc_id;
     int end_doc_id;
     int length;
+};
+
+// DocumentInfo struct
+struct DocumentInfo
+{
+    int total_term;
+    std::string snippet;
 };
 
 struct IndexEntry
@@ -68,11 +87,11 @@ struct CompareIndexEntry
 {
     bool operator()(const IndexEntry &a, const IndexEntry &b)
     {
-        return a.word > b.word;
+        return std::lexicographical_compare(a.word.begin(), a.word.end(), b.word.begin(), b.word.end());
     }
 };
 
-// process sentence part
+// Process sentence part
 std::vector<std::string> processSentencePart(const std::string &sentence_part)
 {
     std::vector<std::string> words;
@@ -105,8 +124,9 @@ std::vector<std::string> processSentencePart(const std::string &sentence_part)
     return words;
 }
 
-// process line
+// Process line
 size_t processLine(const std::string &line,
+                   std::unordered_map<int, DocumentInfo> &document_info,
                    std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
                    std::unordered_map<std::string, LexiconInfo> &lexicon, int &last_doc_id)
 {
@@ -119,40 +139,53 @@ size_t processLine(const std::string &line,
     std::string sentence_part;
     std::unordered_map<std::string, int> word_counts;
     size_t memory_increment = 0;
+    document_info[doc_id] = {0, ""};
+    memory_increment += sizeof(DocumentInfo); // for document info
+    document_info[doc_id].snippet.reserve(100);
 
     while (iss >> sentence_part)
     {
+        if (document_info[doc_id].snippet.length() + sentence_part.length() < 97) // 97 is the max length of snippet
+        {
+            document_info[doc_id].snippet += sentence_part + " ";
+        }
+
         std::vector<std::string> words = processSentencePart(sentence_part);
         for (const std::string &word : words)
         {
             if (!word.empty())
+            {
                 word_counts[word]++;
+                document_info[doc_id].total_term++;
+            }
         }
     }
+    document_info[doc_id].snippet += "...";
+    memory_increment += document_info[doc_id].snippet.capacity(); // for snippet
 
     for (const auto &[word, count] : word_counts)
     {
         if (lexicon.find(word) == lexicon.end())
         {
             lexicon[word] = LexiconInfo{doc_id, doc_id, 1};
-            memory_increment += word.capacity() + sizeof(LexiconInfo);
+            memory_increment += word.capacity() + sizeof(LexiconInfo); // for each word compute once
         }
 
         auto &info = lexicon[word];
         int diff = doc_id - info.end_doc_id;
-        if (diff < 0)
-        {
-            std::cout << "doc_id: " << doc_id << ", end_doc_id: " << info.end_doc_id << ", diff: " << diff << std::endl;
-            std::cout << "line: " << line << std::endl;
+        // if (diff < 0)
+        // {
+        //     std::cout << "doc_id: " << doc_id << ", end_doc_id: " << info.end_doc_id << ", diff: " << diff << std::endl;
+        //     std::cout << "line: " << line << std::endl;
 
-            exit(EXIT_FAILURE); // terminate the program
-        }
+        //     exit(EXIT_FAILURE); // terminate the program
+        // }
         info.end_doc_id = doc_id;
         info.length++;
         index[word].push_back({diff, count});
 
-        memory_increment += sizeof(std::pair<int, int>);
-        if (index[word].size() == 1)
+        memory_increment += sizeof(std::pair<int, int>); // for each posting
+        if (index[word].size() == 1)                     // for each word compute once
         {
             memory_increment += word.capacity() + sizeof(std::vector<std::pair<int, int>>);
         }
@@ -163,7 +196,7 @@ size_t processLine(const std::string &line,
     return memory_increment;
 }
 
-// process tar.gz file
+// Process tar.gz file
 void processTarGz(const std::string &filename, int chunk_size)
 {
     struct archive *a;
@@ -184,6 +217,7 @@ void processTarGz(const std::string &filename, int chunk_size)
 
     std::unordered_map<std::string, std::vector<std::pair<int, int>>> index;
     std::unordered_map<std::string, LexiconInfo> lexicon;
+    std::unordered_map<int, DocumentInfo> document_info;
     size_t current_memory_usage = 0;
     int file_counter = 0;
 
@@ -196,13 +230,13 @@ void processTarGz(const std::string &filename, int chunk_size)
             if (size == 0)
                 continue;
 
-            char *buffer = new char[chunk_size];
+            std::unique_ptr<char[]> buffer(new char[chunk_size]);
             size_t total_bytes_read = 0;
             int last_doc_id = -1;
 
             while (total_bytes_read < size)
             {
-                size_t bytesRead = archive_read_data(a, buffer, chunk_size);
+                size_t bytesRead = archive_read_data(a, buffer.get(), chunk_size);
                 if (bytesRead < 0)
                 {
                     std::cerr << "Error reading data from archive: " << archive_error_string(a) << std::endl;
@@ -210,9 +244,9 @@ void processTarGz(const std::string &filename, int chunk_size)
                 }
                 total_bytes_read += bytesRead;
 
-                std::istringstream content(std::string(buffer, bytesRead));
+                std::istringstream content(std::string(buffer.get(), bytesRead));
                 std::string line;
-                std::string leftover;
+                std::string leftover; // leftover bytes from the last line
 
                 while (std::getline(content, line))
                 {
@@ -226,27 +260,34 @@ void processTarGz(const std::string &filename, int chunk_size)
                         leftover = line;
                         continue;
                     }
-                    size_t memory_increment = processLine(line, index, lexicon, last_doc_id);
+                    size_t memory_increment = processLine(line, document_info, index, lexicon, last_doc_id);
+                    // size_t memory_increment = processLine(line, index, lexicon, last_doc_id);
                     current_memory_usage += memory_increment;
 
                     if (current_memory_usage > MEMORY_LIMIT)
                     {
-                        writeToFile(index, file_counter++);
+                        writeIndexToFile(index, file_counter++);
                         size_t index_memory = estimateIndexMemoryUsage(index);
                         index.clear();
-                        current_memory_usage = estimateMemoryUsage(index, lexicon);
+                        current_memory_usage = estimateMemoryUsage(index, lexicon, document_info);
                     }
                 }
             }
-            delete[] buffer;
+            buffer.reset();
         }
     }
 
-    // process remaining data
+    // process remaining data in index
     if (!index.empty())
     {
-        writeToFile(index, file_counter++);
+        writeIndexToFile(index, file_counter++);
     }
+
+    // write document info to file after processing all lines
+    writeDocumentInfoToFile(document_info);
+    document_info.clear();
+    index.clear();
+    current_memory_usage = estimateMemoryUsage(index, lexicon, document_info);
 
     archive_read_close(a);
     archive_read_free(a);
@@ -255,9 +296,10 @@ void processTarGz(const std::string &filename, int chunk_size)
     externalSort(file_counter, lexicon);
 }
 
-// estimate memory usage
+// Estimate memory usage
 size_t estimateMemoryUsage(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
-                           const std::unordered_map<std::string, LexiconInfo> &lexicon)
+                           const std::unordered_map<std::string, LexiconInfo> &lexicon,
+                           const std::unordered_map<int, DocumentInfo> &document_info)
 {
     size_t usage = 0;
     for (const auto &[word, postings] : index)
@@ -268,10 +310,14 @@ size_t estimateMemoryUsage(const std::unordered_map<std::string, std::vector<std
     {
         usage += word.capacity() + sizeof(LexiconInfo);
     }
+    for (const auto &[doc_id, info] : document_info)
+    {
+        usage += info.snippet.capacity() + sizeof(DocumentInfo);
+    }
     return usage;
 }
 
-// estimate index memory usage
+// Estimate index memory usage
 size_t estimateIndexMemoryUsage(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index)
 {
     size_t usage = 0;
@@ -282,33 +328,40 @@ size_t estimateIndexMemoryUsage(const std::unordered_map<std::string, std::vecto
     return usage;
 }
 
-// Varbyte encoding function
-std::vector<uint8_t> varbyteEncode(int number)
+// Varbyte encode function
+std::vector<uint8_t> varbyteEncode(int number, int &size)
 {
-    std::vector<uint8_t> encoded;
+    std::vector<uint8_t> bytes;
     while (number >= 128)
     {
-        encoded.push_back((number & 0x7F) | 0x80); // Set the MSB
-        number >>= 7;                              // Shift right by 7 bits
+        bytes.push_back((number & 0x7F) | 0x80);
+        number >>= 7;
     }
-    encoded.push_back(number & 0x7F); // Last byte without MSB
-    return encoded;
+    bytes.push_back(number & 0x7F);
+    size = bytes.size();
+    return bytes;
 }
 
-// Varbyte decoding function
+// Varbyte decode function
 int varbyteDecode(const std::vector<uint8_t> &encoded)
 {
     int number = 0;
-    for (uint8_t byte : encoded)
+    int shift = 0;
+
+    for (size_t i = 0; i < encoded.size(); ++i)
     {
-        number = (number << 7) | (byte & 0x7F);
+        number |= (encoded[i] & 0x7F) << shift;
+        if (!(encoded[i] & 0x80))
+            break;
+        shift += 7;
     }
+
     return number;
 }
 
-// write to file
-void writeToFile(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
-                 int file_number)
+// Write index to file
+void writeIndexToFile(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
+                      int file_number)
 {
     std::string filename = "temp_index_" + std::to_string(file_number) + ".txt";
     std::ofstream outfile(filename);
@@ -334,7 +387,18 @@ void writeToFile(const std::unordered_map<std::string, std::vector<std::pair<int
     outfile.close();
 }
 
-// external sort
+// Write document info to file
+void writeDocumentInfoToFile(const std::unordered_map<int, DocumentInfo> &document_info)
+{
+    std::ofstream outfile("document_info.txt");
+    for (const auto &[doc_id, info] : document_info)
+    {
+        outfile << doc_id << " " << info.total_term << " " << info.snippet << "\n";
+    }
+    outfile.close();
+}
+
+// External sort
 void externalSort(int num_files, const std::unordered_map<std::string, LexiconInfo> &lexicon)
 {
     std::priority_queue<IndexEntry, std::vector<IndexEntry>, CompareIndexEntry> pq;
