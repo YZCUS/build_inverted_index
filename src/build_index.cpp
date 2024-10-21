@@ -282,7 +282,29 @@ size_t estimateIndexMemoryUsage(const std::unordered_map<std::string, std::vecto
     return usage;
 }
 
+// Varbyte encoding function
+std::vector<uint8_t> varbyteEncode(int number)
+{
+    std::vector<uint8_t> encoded;
+    while (number >= 128)
+    {
+        encoded.push_back((number & 0x7F) | 0x80); // Set the MSB
+        number >>= 7;                              // Shift right by 7 bits
+    }
+    encoded.push_back(number & 0x7F); // Last byte without MSB
+    return encoded;
+}
 
+// Varbyte decoding function
+int varbyteDecode(const std::vector<uint8_t> &encoded)
+{
+    int number = 0;
+    for (uint8_t byte : encoded)
+    {
+        number = (number << 7) | (byte & 0x7F);
+    }
+    return number;
+}
 
 // write to file
 void writeToFile(const std::unordered_map<std::string, std::vector<std::pair<int, int>>> &index,
