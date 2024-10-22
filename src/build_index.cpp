@@ -71,10 +71,11 @@ struct LexiconInfo
     int length;
 };
 
+// IndexEntry struct
 struct IndexEntry
 {
     int term_id;
-    int file_index; // 添加 file_index 成员
+    int file_index; // add file_index member
     std::streamoff file_position;
     std::vector<std::pair<int, int>> postings;
 
@@ -82,6 +83,7 @@ struct IndexEntry
         : term_id(t), file_index(fi), file_position(fp), postings(std::move(p)) {}
 };
 
+// CompareIndexEntry struct
 struct CompareIndexEntry
 {
     const std::unordered_map<int, std::string> *term_id_to_word;
