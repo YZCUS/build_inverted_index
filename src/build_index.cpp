@@ -32,9 +32,9 @@ size_t estimateMemoryUsage(const std::unordered_map<int, std::vector<std::pair<i
                            const std::unordered_map<int, int> &document_term_count);
 
 // Varbyte encode function
-std::vector<uint8_t> varbyteEncode(int number, int &size);
+std::vector<uint8_t> varbyteEncode(uint32_t number);
 // Varbyte decode function
-int varbyteDecode(const std::vector<uint8_t> &encoded);
+uint32_t varbyteDecode(const std::vector<uint8_t> &bytes);
 
 // write to file
 void writeIndexToFile(const std::unordered_map<int, std::vector<std::pair<int, int>>> &index,
@@ -51,6 +51,9 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
 void writeMergedPostings(std::ofstream &outfile, const std::string &word,
                          const std::vector<std::pair<int, int>> &postings,
                          const std::unordered_map<std::string, LexiconInfo> &lexicon);
+
+// read next entry
+IndexEntry readNextEntry(std::ifstream &file, int file_index, const std::unordered_map<int, std::string> &term_id_to_word);
 
 // Posting struct
 struct Posting
@@ -71,11 +74,12 @@ struct LexiconInfo
 struct IndexEntry
 {
     int term_id;
-    int file_index;
+    int file_index; // 添加 file_index 成员
+    std::streamoff file_position;
     std::vector<std::pair<int, int>> postings;
 
-    IndexEntry(int t, int fi, const std::vector<std::pair<int, int>> &p)
-        : term_id(t), file_index(fi), postings(p) {}
+    IndexEntry(int t, int fi, std::streamoff fp, std::vector<std::pair<int, int>> &&p)
+        : term_id(t), file_index(fi), file_position(fp), postings(std::move(p)) {}
 };
 
 struct CompareIndexEntry
@@ -320,33 +324,26 @@ size_t estimateMemoryUsage(const std::unordered_map<int, std::vector<std::pair<i
 }
 
 // Varbyte encode function
-std::vector<uint8_t> varbyteEncode(int number, int &size)
+std::vector<uint8_t> varbyteEncode(uint32_t number)
 {
     std::vector<uint8_t> bytes;
     while (number >= 128)
     {
-        bytes.push_back((number & 0x7F) | 0x80);
+        bytes.push_back((number & 127) | 128);
         number >>= 7;
     }
-    bytes.push_back(number & 0x7F);
-    size = bytes.size();
+    bytes.push_back(number);
     return bytes;
 }
 
 // Varbyte decode function
-int varbyteDecode(const std::vector<uint8_t> &encoded)
+uint32_t varbyteDecode(const std::vector<uint8_t> &bytes)
 {
-    int number = 0;
-    int shift = 0;
-
-    for (size_t i = 0; i < encoded.size(); ++i)
+    uint32_t number = 0;
+    for (int i = bytes.size() - 1; i >= 0; --i)
     {
-        number |= (encoded[i] & 0x7F) << shift;
-        if (!(encoded[i] & 0x80))
-            break;
-        shift += 7;
+        number = (number << 7) | (bytes[i] & 127);
     }
-
     return number;
 }
 
@@ -355,32 +352,40 @@ void writeIndexToFile(const std::unordered_map<int, std::vector<std::pair<int, i
                       const std::unordered_map<int, std::string> &term_id_to_word,
                       int file_number)
 {
-    std::string filename = "temp_index_" + std::to_string(file_number) + ".txt";
-    std::ofstream outfile(filename);
+    std::string filename = "temp_index_" + std::to_string(file_number) + ".bin";
+    std::ofstream outfile(filename, std::ios::binary);
 
-    // create a vector of term_id
     std::vector<int> sorted_term_ids;
     for (const auto &[term_id, _] : index)
     {
         sorted_term_ids.push_back(term_id);
     }
 
-    // sort term_id by the order of the corresponding words
     std::sort(sorted_term_ids.begin(), sorted_term_ids.end(),
               [&term_id_to_word](int a, int b)
               {
                   return term_id_to_word.at(a) < term_id_to_word.at(b);
               });
 
-    // write sorted index
     for (const int term_id : sorted_term_ids)
     {
-        outfile << term_id << " ";
-        for (const auto &[diff, count] : index.at(term_id))
+        // encode term_id
+        auto encoded_term_id = varbyteEncode(term_id);
+        outfile.write(reinterpret_cast<const char *>(encoded_term_id.data()), encoded_term_id.size());
+
+        // encode postings count
+        const auto &postings = index.at(term_id);
+        auto encoded_size = varbyteEncode(postings.size());
+        outfile.write(reinterpret_cast<const char *>(encoded_size.data()), encoded_size.size());
+
+        // encode postings
+        for (const auto &[diff, count] : postings)
         {
-            outfile << diff << " " << count << " ";
+            auto encoded_diff = varbyteEncode(diff);
+            auto encoded_count = varbyteEncode(count);
+            outfile.write(reinterpret_cast<const char *>(encoded_diff.data()), encoded_diff.size());
+            outfile.write(reinterpret_cast<const char *>(encoded_count.data()), encoded_count.size());
         }
-        outfile << "\n";
     }
     outfile.close();
 }
@@ -406,20 +411,14 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
 
     for (int i = 0; i < num_files; ++i)
     {
-        files[i].open("temp_index_" + std::to_string(i) + ".txt");
-        std::string line;
-        if (std::getline(files[i], line))
+        files[i].open("temp_index_" + std::to_string(i) + ".bin", std::ios::binary);
+        if (files[i].is_open())
         {
-            std::istringstream iss(line);
-            int term_id;
-            iss >> term_id;
-            std::vector<std::pair<int, int>> postings;
-            int diff, count;
-            while (iss >> diff >> count)
+            IndexEntry entry = readNextEntry(files[i], i, term_id_to_word);
+            if (entry.term_id != -1)
             {
-                postings.push_back({diff, count});
+                pq.push(std::move(entry));
             }
-            pq.push(IndexEntry(term_id, i, postings));
         }
     }
 
@@ -455,19 +454,12 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
             current_term_id = -1;
         }
 
-        std::string line;
-        if (std::getline(files[top.file_index], line))
+        // when need to reposition the file pointer
+        files[top.file_index].seekg(top.file_position);
+        IndexEntry entry = readNextEntry(files[top.file_index], top.file_index, term_id_to_word);
+        if (entry.term_id != -1)
         {
-            std::istringstream iss(line);
-            int term_id;
-            iss >> term_id;
-            std::vector<std::pair<int, int>> postings;
-            int diff, count;
-            while (iss >> diff >> count)
-            {
-                postings.push_back({diff, count});
-            }
-            pq.push(IndexEntry(term_id, top.file_index, postings));
+            pq.push(std::move(entry));
         }
     }
 
@@ -485,7 +477,7 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
     // delete temp files
     for (int i = 0; i < num_files; ++i)
     {
-        std::remove(("temp_index_" + std::to_string(i) + ".txt").c_str());
+        std::remove(("temp_index_" + std::to_string(i) + ".bin").c_str());
     }
 }
 
@@ -501,6 +493,64 @@ void writeMergedPostings(std::ofstream &outfile, const std::string &word,
         outfile << diff << " " << count << " ";
     }
     outfile << "\n";
+}
+
+// read next entry
+IndexEntry readNextEntry(std::ifstream &file, int file_index, const std::unordered_map<int, std::string> &term_id_to_word)
+{
+    std::vector<uint8_t> buffer;
+    uint8_t byte;
+
+    // read term_id
+    while (file.read(reinterpret_cast<char *>(&byte), 1))
+    {
+        buffer.push_back(byte);
+        if (!(byte & 0x80))
+            break;
+    }
+    if (buffer.empty())
+        return {-1, file_index, 0, {}}; // file end
+    int term_id = varbyteDecode(buffer);
+    buffer.clear();
+
+    // read postings count
+    while (file.read(reinterpret_cast<char *>(&byte), 1))
+    {
+        buffer.push_back(byte);
+        if (!(byte & 0x80))
+            break;
+    }
+    int postings_count = varbyteDecode(buffer);
+    buffer.clear();
+
+    // read postings
+    std::vector<std::pair<int, int>> postings;
+    for (int i = 0; i < postings_count; ++i)
+    {
+        // read diff
+        while (file.read(reinterpret_cast<char *>(&byte), 1))
+        {
+            buffer.push_back(byte);
+            if (!(byte & 0x80))
+                break;
+        }
+        int diff = varbyteDecode(buffer);
+        buffer.clear();
+
+        // read count
+        while (file.read(reinterpret_cast<char *>(&byte), 1))
+        {
+            buffer.push_back(byte);
+            if (!(byte & 0x80))
+                break;
+        }
+        int count = varbyteDecode(buffer);
+        buffer.clear();
+
+        postings.emplace_back(diff, count);
+    }
+
+    return {term_id, file_index, file.tellg(), std::move(postings)};
 }
 
 int main(int argc, char *argv[])
