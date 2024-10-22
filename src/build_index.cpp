@@ -15,7 +15,6 @@
 #include <regex>
 
 const int CHUNK_SIZE = 1024 * 64;              // 64KB
-const int LINES_PER_BATCH = 100000;            // process lines per batch
 const std::string TEMP_DIR = "temp_index";     // temp directory
 const size_t MEMORY_LIMIT = 800 * 1024 * 1024; // 800MB, leave space for lexicon and other operations
 
