@@ -16,7 +16,7 @@
 
 const int CHUNK_SIZE = 1024 * 64;              // 64KB
 const std::string TEMP_DIR = "temp_index";     // temp directory
-const size_t MEMORY_LIMIT = 800 * 1024 * 1024; // 800MB, leave space for lexicon and other operations
+const size_t MEMORY_LIMIT = 500 * 1024 * 1024; // 500MB, leave space for lexicon and other operations
 
 // forward declarations
 struct Posting;
@@ -44,12 +44,8 @@ void writeIndexToFile(const std::unordered_map<int, std::vector<std::pair<int, i
 void writeDocumentInfoToFile(const std::unordered_map<int, int> &document_term_count);
 
 // external sort
-void externalSort(int num_files, const std::unordered_map<std::string, LexiconInfo> &lexicon,
+void externalSort(int num_files, std::unordered_map<std::string, LexiconInfo> &lexicon,
                   const std::unordered_map<int, std::string> &term_id_to_word);
-// write merged postings
-void writeMergedPostings(std::ofstream &outfile, const std::string &word,
-                         const std::vector<std::pair<int, int>> &postings,
-                         const std::unordered_map<std::string, LexiconInfo> &lexicon);
 
 // read next entry
 IndexEntry readNextEntry(std::ifstream &file, int file_index, const std::unordered_map<int, std::string> &term_id_to_word);
@@ -65,9 +61,10 @@ struct Posting
 struct LexiconInfo
 {
     int term_id;
-    int start_doc_id;
     int end_doc_id;
-    int length;
+    int posting_number;
+    int64_t start_position;
+    int64_t bytes_size;
 };
 
 // IndexEntry struct
@@ -166,7 +163,7 @@ size_t processLine(const std::string &line,
     {
         if (lexicon.find(word) == lexicon.end())
         {
-            lexicon[word] = LexiconInfo{term_id, doc_id, doc_id, 1};
+            lexicon[word] = LexiconInfo{term_id, 0, 0, 0, 0};
             term_id_to_word[term_id] = word;
             memory_increment += word.capacity() + sizeof(LexiconInfo);
             term_id++;
@@ -175,7 +172,7 @@ size_t processLine(const std::string &line,
         auto &info = lexicon[word];
         int diff = doc_id - info.end_doc_id;
         info.end_doc_id = doc_id;
-        info.length++;
+        info.posting_number++;
         index[info.term_id].push_back({diff, count});
 
         memory_increment += sizeof(std::pair<int, int>);
@@ -184,8 +181,11 @@ size_t processLine(const std::string &line,
             memory_increment += sizeof(int) + sizeof(std::vector<std::pair<int, int>>);
         }
     }
-    std::cout << "Processed line: " << doc_id << ", memory increment: " << memory_increment
-              << ", words: " << word_counts.size() << std::endl;
+    if (doc_id % 100000 == 0)
+    {
+        std::cout << "Processed line: " << doc_id << ", memory increment: " << memory_increment
+                  << ", words: " << word_counts.size() << std::endl;
+    }
     last_doc_id = doc_id;
 
     return memory_increment;
@@ -216,10 +216,13 @@ void processTarGz(const std::string &filename, int chunk_size)
     std::unordered_map<int, std::string> term_id_to_word;
     size_t current_memory_usage = 0;
     int file_counter = 0;
+    int last_doc_id = 0;
+    int term_id = 0;
+    int small_doc_test = 9000000;
 
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK)
     {
-        if (archive_entry_filetype(entry) == AE_IFREG)
+        if (archive_entry_filetype(entry) == AE_IFREG && last_doc_id < small_doc_test)
         {
             const char *currentFile = archive_entry_pathname(entry);
             size_t size = archive_entry_size(entry);
@@ -228,11 +231,9 @@ void processTarGz(const std::string &filename, int chunk_size)
 
             std::unique_ptr<char[]> buffer(new char[chunk_size]);
             size_t total_bytes_read = 0;
-            int last_doc_id = -1;
-            int term_id = 0;
             std::string leftover; // for storing the remaining part of the last block
 
-            while (total_bytes_read < size)
+            while (total_bytes_read < size && last_doc_id < small_doc_test)
             {
                 size_t bytesRead = archive_read_data(a, buffer.get(), chunk_size);
                 if (bytesRead < 0)
@@ -247,7 +248,7 @@ void processTarGz(const std::string &filename, int chunk_size)
                 std::string line;
                 leftover.clear();
 
-                while (std::getline(content, line))
+                while (std::getline(content, line) && last_doc_id < small_doc_test)
                 {
                     if (content.eof() && line.back() != '\n')
                     {
@@ -259,7 +260,7 @@ void processTarGz(const std::string &filename, int chunk_size)
                     size_t memory_increment = processLine(line, document_term_count, index, lexicon, term_id_to_word, last_doc_id, term_id);
                     current_memory_usage += memory_increment;
 
-                    if (current_memory_usage > MEMORY_LIMIT)
+                    if (current_memory_usage > MEMORY_LIMIT || last_doc_id >= small_doc_test)
                     {
                         writeIndexToFile(index, term_id_to_word, file_counter++);
                         index.clear();
@@ -269,7 +270,7 @@ void processTarGz(const std::string &filename, int chunk_size)
             }
 
             // process the last incomplete line
-            if (!leftover.empty())
+            if (!leftover.empty() && last_doc_id < small_doc_test)
             {
                 size_t memory_increment = processLine(leftover, document_term_count, index, lexicon, term_id_to_word, last_doc_id, term_id);
                 current_memory_usage += memory_increment;
@@ -295,6 +296,7 @@ void processTarGz(const std::string &filename, int chunk_size)
     archive_read_free(a);
 
     // external sort
+    std::cout << "total_term: " << term_id_to_word.size() << std::endl;
     externalSort(file_counter, lexicon, term_id_to_word);
 }
 
@@ -388,6 +390,7 @@ void writeIndexToFile(const std::unordered_map<int, std::vector<std::pair<int, i
             outfile.write(reinterpret_cast<const char *>(encoded_count.data()), encoded_count.size());
         }
     }
+    sorted_term_ids.clear();
     outfile.close();
 }
 
@@ -403,7 +406,8 @@ void writeDocumentInfoToFile(const std::unordered_map<int, int> &document_term_c
 }
 
 // External sort
-void externalSort(int num_files, const std::unordered_map<std::string, LexiconInfo> &lexicon,
+void externalSort(int num_files,
+                  std::unordered_map<std::string, LexiconInfo> &lexicon,
                   const std::unordered_map<int, std::string> &term_id_to_word)
 {
     CompareIndexEntry comparator(&term_id_to_word);
@@ -423,10 +427,24 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
         }
     }
 
-    std::ofstream outfile("final_sorted_index.txt");
-    std::vector<std::pair<int, int>> merged_postings;
+    std::ofstream final_index_file("final_sorted_index.bin", std::ios::binary);
+    std::ofstream final_index_file2("final_sorted_index2.txt"); // for debug
+    std::ofstream final_lexicon_file("final_sorted_lexicon.txt");
+    std::ofstream final_block_info("final_sorted_block_info.bin", std::ios::binary);
+    std::ofstream final_block_info2("final_sorted_block_info2.txt"); // for debug
+    std::vector<uint8_t> merged_doc_ids;
+    std::vector<uint8_t> merged_counts;
+    std::vector<std::pair<int, int64_t>> block; // store last posting number and position
+    int64_t current_position = 0;
+
     int current_term_id = -1;
-    size_t memory_usage = 0;
+    int last_doc_id = 0;
+
+    const size_t BLOCK_SIZE = 64 * 1024; // 64KB
+    std::vector<uint8_t> current_block;
+    current_block.reserve(BLOCK_SIZE);
+    std::vector<uint8_t> doc_id_buffer;
+    std::vector<uint8_t> count_buffer;
 
     while (!pq.empty())
     {
@@ -437,23 +455,52 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
         {
             if (current_term_id != -1)
             {
-                writeMergedPostings(outfile, term_id_to_word.at(current_term_id), merged_postings, lexicon);
-                memory_usage -= merged_postings.capacity() * sizeof(std::pair<int, int>);
-                merged_postings.clear();
+                lexicon[term_id_to_word.at(current_term_id)].bytes_size =
+                    current_position - lexicon[term_id_to_word.at(current_term_id)].start_position;
+
+                final_lexicon_file << term_id_to_word.at(current_term_id) << " "
+                                   << current_term_id << " "
+                                   << lexicon[term_id_to_word.at(current_term_id)].start_position << " "
+                                   << lexicon[term_id_to_word.at(current_term_id)].bytes_size << "\n";
             }
+
+            lexicon[term_id_to_word.at(top.term_id)].start_position = current_position;
             current_term_id = top.term_id;
+            last_doc_id = 0;
         }
-
-        merged_postings.insert(merged_postings.end(), top.postings.begin(), top.postings.end());
-        memory_usage += top.postings.capacity() * sizeof(std::pair<int, int>);
-
-        if (memory_usage > MEMORY_LIMIT)
+        final_index_file2 << top.term_id << " " << top.postings.size() << " ";
+        for (const auto &[diff, count] : top.postings)
         {
-            writeMergedPostings(outfile, term_id_to_word.at(current_term_id), merged_postings, lexicon);
-            memory_usage = 0;
-            merged_postings.clear();
-            current_term_id = -1;
+            final_index_file2 << diff << " " << count << " ";
+            auto encoded_diff = varbyteEncode(diff);
+            auto encoded_count = varbyteEncode(count);
+            // add encoded_diff and encoded_count to buffer
+            doc_id_buffer.insert(doc_id_buffer.end(), encoded_diff.begin(), encoded_diff.end());
+            count_buffer.insert(count_buffer.end(), encoded_count.begin(), encoded_count.end());
+
+            // check if need to write new block
+            if (current_block.size() + doc_id_buffer.size() + count_buffer.size() > BLOCK_SIZE)
+            {
+                // add buffer content to current block
+                current_block.insert(current_block.end(), doc_id_buffer.begin(), doc_id_buffer.end());
+                current_block.insert(current_block.end(), count_buffer.begin(), count_buffer.end());
+                doc_id_buffer.assign(current_block.begin() + BLOCK_SIZE, current_block.end());
+                current_block.resize(BLOCK_SIZE);
+
+                // write the complete block
+                final_index_file.write(reinterpret_cast<const char *>(current_block.data()), BLOCK_SIZE);
+                block.emplace_back(last_doc_id, current_position);
+                final_block_info2 << block.size() << " " << last_doc_id << " " << current_position << "\n";
+
+                // clear current block and buffer
+                current_block.clear();
+                doc_id_buffer.clear();
+                count_buffer.clear();
+            }
+            last_doc_id += diff;
+            current_position += encoded_diff.size() + encoded_count.size();
         }
+        final_index_file2 << "\n";
 
         // when need to reposition the file pointer
         files[top.file_index].seekg(top.file_position);
@@ -464,12 +511,26 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
         }
     }
 
-    if (!merged_postings.empty())
+    // process the last block
+    if (!current_block.empty() || !doc_id_buffer.empty() || !count_buffer.empty())
     {
-        writeMergedPostings(outfile, term_id_to_word.at(current_term_id), merged_postings, lexicon);
+        current_block.insert(current_block.end(), doc_id_buffer.begin(), doc_id_buffer.end());
+        current_block.insert(current_block.end(), count_buffer.begin(), count_buffer.end());
+        current_block.resize(BLOCK_SIZE, 0); // fill with 0 to 64KB
+        final_index_file.write(reinterpret_cast<const char *>(current_block.data()), BLOCK_SIZE);
+        block.emplace_back(last_doc_id, current_position);
+        final_block_info2 << block.size() << " " << last_doc_id << " " << current_position << "\n";
+        current_position += current_block.size();
     }
 
-    outfile.close();
+    // write the last block info into the file
+    final_block_info.write(reinterpret_cast<const char *>(block.data()), block.size() * sizeof(std::pair<int, int64_t>));
+
+    final_index_file.close();
+    final_lexicon_file.close();
+    final_block_info.close();
+    final_index_file2.close();
+    final_block_info2.close();
     for (auto &file : files)
     {
         file.close();
@@ -480,20 +541,6 @@ void externalSort(int num_files, const std::unordered_map<std::string, LexiconIn
     {
         std::remove(("temp_index_" + std::to_string(i) + ".bin").c_str());
     }
-}
-
-void writeMergedPostings(std::ofstream &outfile, const std::string &word,
-                         const std::vector<std::pair<int, int>> &postings,
-                         const std::unordered_map<std::string, LexiconInfo> &lexicon)
-{
-    outfile << word << " ";
-    const auto &info = lexicon.at(word);
-    outfile << info.start_doc_id << " " << info.end_doc_id << " " << info.length << " ";
-    for (const auto &[diff, count] : postings)
-    {
-        outfile << diff << " " << count << " ";
-    }
-    outfile << "\n";
 }
 
 // read next entry
