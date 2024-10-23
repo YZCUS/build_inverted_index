@@ -17,7 +17,7 @@ set(SOURCE_DIR src)
 # Add executable
 add_executable(build_index ${SOURCE_DIR}/build_index.cpp)
 add_executable(varbyte_encode_test ${SOURCE_DIR}/varbyte_encode_test.cpp)
-# add_executable(search ${SOURCE_DIR}/search.cpp)
+add_executable(search ${SOURCE_DIR}/search_engine.cpp)
 
 # Link the LibArchive library
 target_include_directories(build_index PRIVATE ${LibArchive_INCLUDE_DIR})
