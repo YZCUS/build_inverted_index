@@ -28,7 +28,7 @@ struct CompareIndexEntry;
 size_t estimateMemoryUsage(const std::unordered_map<int, std::vector<std::pair<int, int>>> &index,
                            const std::unordered_map<std::string, LexiconInfo> &lexicon,
                            const std::unordered_map<int, std::string> &term_id_to_word,
-                           const std::unordered_map<int, int> &document_term_count);
+                           const std::unordered_map<int, std::pair<int, int64_t>> &document_info);
 
 // Varbyte encode function
 std::vector<uint8_t> varbyteEncode(uint32_t number);
@@ -41,7 +41,7 @@ void writeIndexToFile(const std::unordered_map<int, std::vector<std::pair<int, i
                       int file_number);
 
 // write document info to file
-void writeDocumentInfoToFile(const std::unordered_map<int, int> &document_term_count);
+void writeDocumentInfoToFile(const std::unordered_map<int, std::pair<int, int64_t>> &document_info);
 
 // external sort
 void externalSort(int num_files, std::unordered_map<std::string, LexiconInfo> &lexicon,
@@ -128,11 +128,12 @@ std::vector<std::string> processSentencePart(const std::string &sentence_part)
 
 // Process line
 size_t processLine(const std::string &line,
-                   std::unordered_map<int, int> &document_term_count,
+                   std::unordered_map<int, std::pair<int, int64_t>> &document_info,
                    std::unordered_map<int, std::vector<std::pair<int, int>>> &index,
                    std::unordered_map<std::string, LexiconInfo> &lexicon,
                    std::unordered_map<int, std::string> &term_id_to_word,
-                   int &last_doc_id, int &term_id)
+                   int &last_doc_id, int &term_id,
+                   std::streamoff &line_position)
 {
     std::istringstream iss(line);
     int doc_id;
@@ -141,10 +142,14 @@ size_t processLine(const std::string &line,
         std::cerr << "Invalid doc_id: " << doc_id << ", last_doc_id: " << last_doc_id << std::endl;
         return 0;
     }
+
     std::string sentence_part;
     std::unordered_map<std::string, int> word_counts;
     size_t memory_increment = 0;
     memory_increment += sizeof(int); // for document info
+
+    // update document info of position of doc_id
+    document_info[doc_id] = {0, line_position + iss.tellg()};
 
     while (iss >> sentence_part)
     {
@@ -154,9 +159,16 @@ size_t processLine(const std::string &line,
             if (!word.empty())
             {
                 word_counts[word]++;
-                document_term_count[doc_id]++;
+                document_info[doc_id].first++;
             }
         }
+    }
+
+    if (line_position < 0)
+    {
+        std::cerr << "line_position is negative: " << line_position << std::endl;
+        std::cerr << "offset: " << iss.tellg() << std::endl;
+        exit(1);
     }
 
     for (const auto &[word, count] : word_counts)
@@ -212,13 +224,14 @@ void processTarGz(const std::string &filename, int chunk_size)
 
     std::unordered_map<int, std::vector<std::pair<int, int>>> index;
     std::unordered_map<std::string, LexiconInfo> lexicon;
-    std::unordered_map<int, int> document_term_count;
+    std::unordered_map<int, std::pair<int, int64_t>> document_info;
     std::unordered_map<int, std::string> term_id_to_word;
     size_t current_memory_usage = 0;
     int file_counter = 0;
     int last_doc_id = 0;
     int term_id = 0;
     int small_doc_test = 9000000;
+    std::streamoff line_position = 0;
 
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK)
     {
@@ -257,14 +270,15 @@ void processTarGz(const std::string &filename, int chunk_size)
                         break;
                     }
 
-                    size_t memory_increment = processLine(line, document_term_count, index, lexicon, term_id_to_word, last_doc_id, term_id);
+                    size_t memory_increment = processLine(line, document_info, index, lexicon, term_id_to_word, last_doc_id, term_id, line_position);
+                    line_position += line.size() + 1; // +1 for '\n'
                     current_memory_usage += memory_increment;
 
                     if (current_memory_usage > MEMORY_LIMIT || last_doc_id >= small_doc_test)
                     {
                         writeIndexToFile(index, term_id_to_word, file_counter++);
                         index.clear();
-                        current_memory_usage = estimateMemoryUsage(index, lexicon, term_id_to_word, document_term_count);
+                        current_memory_usage = estimateMemoryUsage(index, lexicon, term_id_to_word, document_info);
                     }
                 }
             }
@@ -272,7 +286,7 @@ void processTarGz(const std::string &filename, int chunk_size)
             // process the last incomplete line
             if (!leftover.empty() && last_doc_id < small_doc_test)
             {
-                size_t memory_increment = processLine(leftover, document_term_count, index, lexicon, term_id_to_word, last_doc_id, term_id);
+                size_t memory_increment = processLine(leftover, document_info, index, lexicon, term_id_to_word, last_doc_id, term_id, line_position);
                 current_memory_usage += memory_increment;
             }
 
@@ -287,10 +301,11 @@ void processTarGz(const std::string &filename, int chunk_size)
     }
 
     // write document info to file after processing all lines
-    writeDocumentInfoToFile(document_term_count);
-    document_term_count.clear();
+    writeDocumentInfoToFile(document_info);
+    std::cout << "document_info size: " << document_info.size() << std::endl;
+    document_info.clear();
     index.clear();
-    current_memory_usage = estimateMemoryUsage(index, lexicon, term_id_to_word, document_term_count);
+    current_memory_usage = estimateMemoryUsage(index, lexicon, term_id_to_word, document_info);
 
     archive_read_close(a);
     archive_read_free(a);
@@ -304,7 +319,7 @@ void processTarGz(const std::string &filename, int chunk_size)
 size_t estimateMemoryUsage(const std::unordered_map<int, std::vector<std::pair<int, int>>> &index,
                            const std::unordered_map<std::string, LexiconInfo> &lexicon,
                            const std::unordered_map<int, std::string> &term_id_to_word,
-                           const std::unordered_map<int, int> &document_term_count)
+                           const std::unordered_map<int, std::pair<int, int64_t>> &document_info)
 {
     size_t usage = 0;
     for (const auto &[term_id, postings] : index)
@@ -315,9 +330,9 @@ size_t estimateMemoryUsage(const std::unordered_map<int, std::vector<std::pair<i
     {
         usage += word.capacity() + sizeof(LexiconInfo);
     }
-    for (const auto &[doc_id, count] : document_term_count)
+    for (const auto &[doc_id, pair] : document_info)
     {
-        usage += sizeof(int);
+        usage += sizeof(int) + sizeof(std::pair<int, int64_t>);
     }
     for (const auto &[term_id, word] : term_id_to_word)
     {
@@ -395,12 +410,12 @@ void writeIndexToFile(const std::unordered_map<int, std::vector<std::pair<int, i
 }
 
 // Write document info to file
-void writeDocumentInfoToFile(const std::unordered_map<int, int> &document_term_count)
+void writeDocumentInfoToFile(const std::unordered_map<int, std::pair<int, int64_t>> &document_info)
 {
-    std::ofstream outfile("document_term_count.txt");
-    for (const auto &[doc_id, count] : document_term_count)
+    std::ofstream outfile("document_info.txt");
+    for (const auto &[doc_id, pair] : document_info)
     {
-        outfile << doc_id << " " << count << "\n";
+        outfile << doc_id << " " << pair.first << " " << pair.second << "\n";
     }
     outfile.close();
 }
@@ -484,18 +499,22 @@ void externalSort(int num_files,
                 // add buffer content to current block
                 current_block.insert(current_block.end(), doc_id_buffer.begin(), doc_id_buffer.end());
                 current_block.insert(current_block.end(), count_buffer.begin(), count_buffer.end());
+
+                // clear buffer
+                doc_id_buffer.clear();
+                count_buffer.clear();
+
+                // assign the remaining content to buffer
                 doc_id_buffer.assign(current_block.begin() + BLOCK_SIZE, current_block.end());
                 current_block.resize(BLOCK_SIZE);
 
                 // write the complete block
                 final_index_file.write(reinterpret_cast<const char *>(current_block.data()), BLOCK_SIZE);
-                block.emplace_back(last_doc_id, current_position);
-                final_block_info2 << block.size() << " " << last_doc_id << " " << current_position << "\n";
+                block.emplace_back(current_term_id, current_position); // store the last term_id and close position
+                final_block_info2 << block.size() << " " << current_term_id << " " << current_position << "\n";
 
                 // clear current block and buffer
                 current_block.clear();
-                doc_id_buffer.clear();
-                count_buffer.clear();
             }
             last_doc_id += diff;
             current_position += encoded_diff.size() + encoded_count.size();

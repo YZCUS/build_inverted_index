@@ -9,6 +9,10 @@
 #include <sstream>
 
 const int BLOCK_SIZE = 64 * 1024; // 64KB
+const std::string LEXICON_FILE = "final_sorted_lexicon.txt";
+const std::string INDEX_FILE = "final_sorted_index.bin";
+const std::string DOC_LENGTHS_FILE = "document_term_count.txt";
+const std::string BLOCK_INFO_FILE = "final_block_info2.txt";
 
 // parameters
 const double k1 = 1.2;
@@ -76,8 +80,10 @@ private:
 
 class SearchEngine
 {
-private:
+private: // private members
     std::unordered_map<std::string, LexiconEntry> lexicon;
+    std::vector<std::pair<std::string, int>> block;
+    std::unordered_map<int, std::string> term_id_to_word;
     std::ifstream index_file;
     std::ifstream doc_lengths_file;
     int total_docs;
@@ -91,36 +97,52 @@ private:
         return length;
     }
 
-public:
+public: // public members
     SearchEngine(const std::string &lexicon_file, const std::string &index_file,
-                 const std::string &doc_lengths_file, const std::string &stats_file)
+                 const std::string &doc_lengths_file, const std::string &block_info_file)
         : index_file(index_file, std::ios::binary), doc_lengths_file(doc_lengths_file, std::ios::binary)
     {
         loadLexicon(lexicon_file);
-        loadIndexStats(stats_file);
+        loadBlockInfo(block_info_file, term_id_to_word);
     }
 
     void loadLexicon(const std::string &lexicon_file)
     {
         std::ifstream lex_file(lexicon_file);
+        std::unordered_map<int, std::string> term_id_to_word;
         std::string term;
         LexiconEntry entry;
-        while (lex_file >> term >> entry.term_id >> entry.start_position >> entry.bytes_size)
+        std::cout << "Loading lexicon..." << std::endl;
+        while (lex_file >> term >> entry.term_id >> entry.start_position >> entry.bytes_size) // tested
         {
             lexicon[term] = entry;
+            term_id_to_word[entry.term_id] = term;
         }
+        std::cout << "Lexicon loaded." << std::endl;
     }
 
-    void loadIndexStats(const std::string &stats_file)
+    void loadBlockInfo(const std::string &block_info_file, const std::unordered_map<int, std::string> &term_id_to_word)
     {
-        std::ifstream stats(stats_file);
-        stats >> total_docs >> avg_doc_length;
+        std::cout << "Loading block info..." << std::endl;
+        std::ifstream block_info(block_info_file);
+        int ind;
+        while (block_info >> ind)
+        {
+            int last_term_id;
+            int block_close_pos;
+            block_info >> last_term_id >> block_close_pos;
+            std::string last_term = term_id_to_word.at(last_term_id);
+            block.push_back({last_term, block_close_pos});
+        }
+        std::cout << "Block info loaded." << std::endl;
     }
 
     std::vector<SearchResult> search(const std::string &query, bool conjunctive)
     {
+        // process the query
         std::vector<std::string> terms = processQuery(query);
         std::vector<InvertedList> lists;
+        // find the inverted lists for the terms
         for (const auto &term : terms)
         {
             if (lexicon.find(term) != lexicon.end())
@@ -130,6 +152,7 @@ public:
             }
         }
 
+        // if no lists are found, return empty vector
         if (lists.empty())
             return {};
 
@@ -151,7 +174,7 @@ public:
         return results;
     }
 
-private:
+private: // private methods
     std::vector<std::string> processQuery(const std::string &query)
     {
         std::vector<std::string> terms;
@@ -269,6 +292,7 @@ private:
     }
 };
 
+// varbyte decode function
 int varbyteDecode(const std::vector<uint8_t> &encoded, size_t &pos)
 {
     int value = 0;
@@ -285,8 +309,10 @@ int varbyteDecode(const std::vector<uint8_t> &encoded, size_t &pos)
 
 int main()
 {
-    SearchEngine engine("final_sorted_lexicon.txt", "final_sorted_index.bin",
-                        "doc_lengths.bin", "index_stats.txt");
+    SearchEngine engine(LEXICON_FILE,
+                        INDEX_FILE,
+                        DOC_LENGTHS_FILE,
+                        BLOCK_INFO_FILE);
 
     std::string query;
     bool conjunctive;
