@@ -14,10 +14,10 @@
 #include "archive_entry.h"
 #include <regex>
 
-const int CHUNK_SIZE = 1024 * 64;             // 64KB
-const std::string TEMP_DIR = "temp_index";    // temp directory
-const size_t MEMORY_LIMIT = 50 * 1024 * 1024; // 50MB, leave space for lexicon and other operations
-const int SMALL_DOC_TEST = 400000;
+const int CHUNK_SIZE = 1024 * 64;              // 64KB
+const std::string TEMP_DIR = "temp_index";     // temp directory
+const size_t MEMORY_LIMIT = 500 * 1024 * 1024; // 500MB, leave space for lexicon and other operations
+const int SMALL_DOC_TEST = 9000000;
 
 // forward declarations
 struct Posting;
@@ -150,7 +150,7 @@ size_t processLine(const std::string &line,
     memory_increment += sizeof(int); // for document info
 
     // update document info of position of doc_id
-    document_info[doc_id] = {0, line_position + iss.tellg()};
+    document_info[doc_id] = {0, line_position};
 
     while (iss >> sentence_part)
     {

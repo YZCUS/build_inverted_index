@@ -25,4 +25,5 @@ target_link_libraries(build_index PRIVATE ${LibArchive_LIBRARY})
 
 # Link the Zlib library
 target_link_libraries(build_index PRIVATE ${ZLIB_LIBRARIES})
+target_link_libraries(search PRIVATE ${ZLIB_LIBRARIES})
 

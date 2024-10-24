@@ -7,12 +7,15 @@
 #include <queue>
 #include <cmath>
 #include <sstream>
+#include <cstdint>
+#include <zlib.h>
 
-const int BLOCK_SIZE = 64 * 1024; // 64KB
+const int POSTING_PER_BLOCK = 128;
 const std::string LEXICON_FILE = "final_sorted_lexicon.txt";
 const std::string INDEX_FILE = "final_sorted_index.bin";
 const std::string DOC_INFO_FILE = "document_info.txt";
 const std::string BLOCK_INFO_FILE = "final_sorted_block_info2.txt";
+const std::string ORIGINAL_TAR_GZ = "../src/collection.tar.gz";
 
 // parameters
 const double k1 = 1.2;
@@ -20,6 +23,8 @@ const double b = 0.75;
 
 // decode function
 uint32_t varbyteDecode(const std::vector<uint8_t> &bytes);
+int varbyteDecode(const uint8_t *data, size_t max_size, size_t &bytes_read);
+size_t varbyteEncodedSize(int value);
 
 struct LexiconEntry
 {
@@ -37,36 +42,6 @@ struct SearchResult
 
 class InvertedList
 {
-public:
-    InvertedList(std::ifstream &index_file, int64_t start_pos, int64_t bytes_size, std::vector<std::pair<int, int>> &block_info)
-        : index_file_(index_file), start_pos_(start_pos), bytes_size_(bytes_size), block_info_(block_info)
-    {
-        std::cout << "Inverted list initialized. Start pos: " << start_pos_ << ", Size: " << bytes_size_ << " bytes." << std::endl;
-        current_block_index_ = start_pos_ / BLOCK_SIZE;
-        loadNextBlock();
-    }
-
-    bool next(int &doc_id, int &freq)
-    {
-        std::cout << "Inverted list next." << std::endl;
-        return false;
-        if (current_pos_ >= current_block_.size())
-        {
-            if (!loadNextBlock())
-            {
-                return false;
-            }
-        }
-        // decode the current block
-        doc_id = varbyteDecode(current_block_);
-        freq = varbyteDecode(current_block_);
-        std::cout << "Doc ID: " << doc_id << ", Freq: " << freq << std::endl;
-
-        return true;
-    }
-
-    int64_t getSize() const { return bytes_size_; }
-
 private:
     std::ifstream &index_file_;
     int64_t start_pos_;
@@ -76,27 +51,86 @@ private:
     std::vector<uint8_t> current_block_;
     int current_block_index_;
 
+    void loadBlockIndex()
+    {
+        std::cout << "Loading block index." << std::endl;
+        for (int i = 0; i < block_info_.size(); ++i)
+        {
+            if (start_pos_ < block_info_[i].second)
+            {
+                current_block_index_ = i - 1;
+                break;
+            }
+        }
+        std::cout << "Block index loaded. Current block index: " << current_block_index_ << std::endl;
+    }
+
+    void openBlock()
+    {
+        std::cout << "Opening block." << std::endl;
+        index_file_.seekg(block_info_[current_block_index_].second);
+        if (current_block_index_ == block_info_.size() - 1) // last block
+        {
+            bytes_size_ = bytes_size_ - block_info_[current_block_index_].second;
+        }
+        else // not the last block
+        {
+            bytes_size_ = block_info_[current_block_index_ + 1].second - block_info_[current_block_index_].second;
+        }
+        current_block_.resize(bytes_size_);
+        index_file_.read(reinterpret_cast<char *>(current_block_.data()), bytes_size_); // read the block into memory
+        current_pos_ = 0;                                                               // reset the current position
+    }
+
     bool loadNextBlock()
     {
         std::cout << "Loading next block." << std::endl;
-        int offset = start_pos_ % BLOCK_SIZE;
-        index_file_.seekg(start_pos_ - offset);
-        int64_t bytes_to_read = std::min(static_cast<int64_t>(BLOCK_SIZE - offset), bytes_size_);
-        current_block_.resize(bytes_to_read);
-        index_file_.read(reinterpret_cast<char *>(current_block_.data()), bytes_to_read);
-        current_pos_ = 0;
         current_block_index_++;
-        start_pos_ += bytes_to_read;
-        bytes_size_ -= bytes_to_read;
-
-        for (auto &byte : current_block_)
+        if (current_block_index_ == block_info_.size()) // no more blocks
         {
-            std::cout << std::hex << static_cast<int>(byte) << " ";
+            return false;
         }
-        std::cout << std::endl;
-
-        return bytes_to_read > 0;
+        openBlock();
+        return true;
     }
+
+public:
+    InvertedList(std::ifstream &index_file, int64_t start_pos, int64_t bytes_size, std::vector<std::pair<int, int>> &block_info)
+        : index_file_(index_file), start_pos_(start_pos), bytes_size_(bytes_size), block_info_(block_info)
+    {
+        std::cout << "Inverted list initialized. Start pos: " << start_pos_ << ", Size: " << bytes_size_ << " bytes." << std::endl;
+        loadBlockIndex();
+        openBlock();
+    }
+
+    bool next(int &doc_id, int &freq)
+    {
+        if (current_pos_ >= POSTING_PER_BLOCK) // Check if we have processed all postings in the current block
+        {
+            if (!loadNextBlock())
+            {
+                return false;
+            }
+            current_pos_ = 0; // Reset position after loading a new block
+        }
+
+        size_t bytes_read = 0;
+
+        // Decode the next doc_id diff
+        int doc_id_diff = varbyteDecode(current_block_.data() + current_pos_, current_block_.size() - current_pos_, bytes_read);
+        current_pos_ += bytes_read; // Move position by the size of the encoded doc_id
+
+        // Decode the corresponding frequency
+        int freq_pos = POSTING_PER_BLOCK + current_pos_; // Calculate position for frequency
+        freq = varbyteDecode(current_block_.data() + freq_pos, current_block_.size() - freq_pos, bytes_read);
+
+        // Update the doc_id with the decoded difference
+        doc_id += doc_id_diff;
+
+        return true;
+    }
+
+    int64_t getSize() const { return bytes_size_; }
 };
 
 class SearchEngine
@@ -107,6 +141,7 @@ private: // private members
     std::unordered_map<int, std::string> term_id_to_word;
     std::ifstream index_file;
     std::ifstream doc_info_file;
+    std::ifstream original_file;
     std::vector<int64_t> lines_pos;
     std::vector<int> doc_lengths;
     int total_docs;
@@ -114,8 +149,8 @@ private: // private members
 
 public: // public members
     SearchEngine(const std::string &lexicon_file, const std::string &index_file,
-                 const std::string &doc_info_file, const std::string &block_info_file)
-        : index_file(index_file, std::ios::binary)
+                 const std::string &doc_info_file, const std::string &block_info_file, const std::string &original_tar_gz)
+        : index_file(index_file, std::ios::binary), original_file(original_tar_gz, std::ios::binary)
     {
         loadLexicon(lexicon_file);
         loadBlockInfo(block_info_file);
@@ -169,6 +204,19 @@ public: // public members
         }
         avg_doc_length = static_cast<double>(total_length) / total_docs;
         std::cout << "Doc info loaded." << std::endl;
+    }
+
+    std::string getOriginalFileContent(int doc_id)
+    {
+        return "document content";
+        // Seek to the position in the compressed file
+        original_file.seekg(lines_pos[doc_id]);
+
+        // Read the compressed data
+        std::string line;
+        std::getline(original_file, line);
+
+        return line;
     }
 
     std::vector<SearchResult> search(const std::string &query, bool conjunctive)
@@ -263,7 +311,6 @@ private: // private methods
             int max_doc = -1;             // Start with an invalid doc_id value
             bool any_list_active = false; // To track if any list is still active
 
-            std::cout << "Conjunctive search loop." << std::endl;
             // Process each inverted list
             for (size_t i = 0; i < lists.size(); ++i)
             {
@@ -345,6 +392,14 @@ private: // private methods
             pq.pop();
 
             double score = 0;
+
+            // Check if doc_id is within the range of doc_lengths
+            if (doc_id < 0 || doc_id >= doc_lengths.size())
+            {
+                std::cerr << "Invalid doc_id: " << doc_id << std::endl;
+                continue;
+            }
+
             int doc_length = doc_lengths[doc_id];
 
             for (size_t i = 0; i < lists.size(); ++i)
@@ -380,12 +435,46 @@ uint32_t varbyteDecode(const std::vector<uint8_t> &bytes)
     return number;
 }
 
+size_t varbyteEncodedSize(int value)
+{
+    size_t size = 0;
+    do
+    {
+        value >>= 7;
+        size++;
+    } while (value > 0);
+    return size;
+}
+
+int varbyteDecode(const uint8_t *data, size_t max_size, size_t &bytes_read)
+{
+    int value = 0;
+    int shift = 0;
+    bytes_read = 0;
+
+    for (size_t i = 0; i < max_size; ++i)
+    {
+        uint8_t byte = data[i];
+        value |= (byte & 0x7F) << shift; // Use lower 7 bits
+        shift += 7;
+        bytes_read++;
+
+        if (byte & 0x80) // Check if this is the last byte
+        {
+            break;
+        }
+    }
+
+    return value;
+}
+
 int main()
 {
     SearchEngine engine(LEXICON_FILE,
                         INDEX_FILE,
                         DOC_INFO_FILE,
-                        BLOCK_INFO_FILE);
+                        BLOCK_INFO_FILE,
+                        ORIGINAL_TAR_GZ);
 
     std::string query;
     bool conjunctive;
@@ -406,6 +495,9 @@ int main()
         for (const auto &result : results)
         {
             std::cout << "Doc ID: " << result.doc_id << ", Score: " << result.score << std::endl;
+            // find line position of the original file and print the content
+            std::string content = engine.getOriginalFileContent(result.doc_id);
+            std::cout << content << std::endl;
         }
     }
 
